@@ -1,0 +1,66 @@
+name: meeting-manager
+version: "0.1.0"
+description: >
+  Reads and schedules Google Calendar events on the user's behalf, with
+  conflict detection and alternative-slot suggestions. Requires the user to
+  have connected a Google account via the Connectors hub (HUMAIN-2060).
+
+# Marketplace-owned deployment block (backend/models/agent_manifest.py
+# DeploymentBlock). `runtime` must be exactly "python" (not "python3.11") —
+# the manifest schema only accepts python | node:20 | java:21.
+deployment:
+  runtime: python
+  resources:
+    cpu: 1
+    memory: 1Gi
+  # No Secret Manager entries: the Google OAuth token is injected directly
+  # into the container as GOOGLE_ACCESS_TOKEN / GOOGLE_ACCOUNT_EMAIL by the
+  # Connectors hub's provision gate (specs/028-user-integrations-connectors),
+  # not read from `secrets:`.
+  secrets: []
+  # HUMAIN-2060 (FR-008/FR-009): the provision gate refuses to launch this
+  # agent with `connector_required` unless the launching user has a
+  # connected Google account.
+  connectors:
+    - provider: google
+
+# H2O-O v0.2 graph (docs/ADDING_AGENTS.md §3). NOTE: as of this writing the
+# HUMAIN marketplace backend does not auto-wire a manifest's nodes/edges to
+# a marketplace-deployed agent's own HTTP container (confirmed against
+# backend/services/manifest_validator.py and backend/services/
+# h2oo_run_adapter.py — there is no tool_call → HTTP bridge for agents like
+# this one). This graph documents the intended flow and is what would be
+# registered with the H2O-O substrate directly (see ADDING_AGENTS.md §11);
+# today the deployed container's own routes (src/main.py) are the only
+# thing actually invoked, one FastAPI POST call per tool below.
+entry: fetch_calendar_events
+
+nodes:
+  - name: fetch_calendar_events
+    type: tool_call
+    inputs:
+      tool: fetch_calendar_events
+      args:
+        query: "this week"
+
+  - name: conflict_check
+    type: tool_call
+    inputs:
+      tool: conflict_check
+      args: {}
+
+  - name: schedule_meeting
+    type: tool_call
+    inputs:
+      tool: schedule_meeting
+      args: {}
+
+edges:
+  - from: fetch_calendar_events
+    to: conflict_check
+  - from: conflict_check
+    to: schedule_meeting
+    when: "$.status == clear"
+    # No edge for the conflict case — the run halts at conflict_check and
+    # surfaces suggested_alternatives as its final output (ADDING_AGENTS.md
+    # §3: a node with no matching outgoing edge ends the run there).
