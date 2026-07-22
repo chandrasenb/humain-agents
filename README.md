@@ -10,6 +10,7 @@ platform (`agent.yaml` manifest + container image).
 agents/
 └── <agent-name>/
     ├── agent.yaml       Platform manifest — runtime, connectors, tool nodes
+    ├── README.md        Endpoints, routing, required env vars
     ├── Dockerfile
     ├── requirements.txt
     └── src/             Agent implementation
@@ -19,4 +20,4 @@ agents/
 
 | Agent | Description |
 |-------|-------------|
-| [`meeting-manager`](agents/meeting-manager/) | Reads and schedules Google Calendar events, with conflict detection. |
+| [`meeting-manager`](agents/meeting-manager/) | Reads and schedules Google Calendar events, with conflict detection. Reachable via structured endpoints or natural-language chat (`/chat`). |

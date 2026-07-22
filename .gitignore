@@ -10,6 +10,8 @@ __pycache__/
 build/
 dist/
 *.egg-info/
+*.tar.gz
+*.tgz
 
 # Virtual environments
 .venv/

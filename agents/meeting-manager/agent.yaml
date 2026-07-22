@@ -1,9 +1,11 @@
 name: meeting-manager
-version: "0.1.0"
+version: "0.2.0"
 description: >
   Reads and schedules Google Calendar events on the user's behalf, with
   conflict detection and alternative-slot suggestions. Requires the user to
   have connected a Google account via the Connectors hub (HUMAIN-2060).
+  Reachable either as structured tool calls or as natural-language chat
+  (the `router` entry node).
 
 # Marketplace-owned deployment block (backend/models/agent_manifest.py
 # DeploymentBlock). `runtime` must be exactly "python" (not "python3.11") —
@@ -13,11 +15,17 @@ deployment:
   resources:
     cpu: 1
     memory: 1Gi
-  # No Secret Manager entries: the Google OAuth token is injected directly
-  # into the container as GOOGLE_ACCESS_TOKEN / GOOGLE_ACCOUNT_EMAIL by the
-  # Connectors hub's provision gate (specs/028-user-integrations-connectors),
-  # not read from `secrets:`.
-  secrets: []
+  # `openai-api-key` / `openai-base-url` are existing Secret Manager entry
+  # names (same names agentic-invoice-processing/agent.yaml declares) — the
+  # platform injects them as OPENAI_API_KEY / OPENAI_BASE_URL, which
+  # src/main.py's /chat endpoint reads to call NVIDIA NIM's OpenAI-
+  # compatible API for intent routing. No other secrets: the Google OAuth
+  # token is injected directly as GOOGLE_ACCESS_TOKEN / GOOGLE_ACCOUNT_EMAIL
+  # by the Connectors hub's provision gate (specs/028-user-integrations-
+  # connectors), not read from `secrets:`.
+  secrets:
+    - openai-api-key
+    - openai-base-url
   # HUMAIN-2060 (FR-008/FR-009): the provision gate refuses to launch this
   # agent with `connector_required` unless the launching user has a
   # connected Google account.
@@ -28,14 +36,38 @@ deployment:
 # HUMAIN marketplace backend does not auto-wire a manifest's nodes/edges to
 # a marketplace-deployed agent's own HTTP container (confirmed against
 # backend/services/manifest_validator.py and backend/services/
-# h2oo_run_adapter.py — there is no tool_call → HTTP bridge for agents like
-# this one). This graph documents the intended flow and is what would be
-# registered with the H2O-O substrate directly (see ADDING_AGENTS.md §11);
-# today the deployed container's own routes (src/main.py) are the only
-# thing actually invoked, one FastAPI POST call per tool below.
-entry: fetch_calendar_events
+# h2oo_run_adapter.py — there is no tool_call/llm → HTTP bridge for agents
+# like this one). This graph documents the intended flow and is what would
+# be registered with the H2O-O substrate directly (see ADDING_AGENTS.md
+# §11); today the deployed container's own /chat route (src/main.py) does
+# this exact routing itself, in Python, independent of this file.
+entry: router
 
 nodes:
+  # LLM entry point (ADDING_AGENTS.md §3.1 `llm` node): parses the user's
+  # natural-language message and decides which one tool to call. Same model
+  # agentic-invoice-processing/agent.yaml declares for its own `llm` node.
+  # src/main.py's actual call reaches it via the openai SDK pointed at
+  # OPENAI_BASE_URL (NVIDIA NIM's OpenAI-compatible endpoint) — the two
+  # aren't wired together yet, see the note above.
+  - name: router
+    type: llm
+    options:
+      model: nvidia/nemotron-3-ultra-550b-a55b
+      system_prompt: >
+        You are the Meeting Manager assistant. You help the user view their
+        Google Calendar and schedule meetings, with conflict detection.
+        Always respond by calling exactly one tool: fetch_calendar_events to
+        look up events for a described time range (e.g. "today", "this
+        week", "next Friday"); conflict_check to test whether a specific
+        proposed time is free without scheduling anything; or
+        schedule_meeting to book a new meeting once the user has given a
+        title and a time. Pass the user's time phrase straight through as
+        the query/when argument — do not convert it to a date yourself, the
+        tool does that. Default duration_minutes to 30 if unspecified. Only
+        include attendees the user explicitly named as email addresses.
+      tools: [fetch_calendar_events, conflict_check, schedule_meeting]
+
   - name: fetch_calendar_events
     type: tool_call
     inputs:
@@ -55,12 +87,27 @@ nodes:
       tool: schedule_meeting
       args: {}
 
+  # Deterministic (not a second LLM call — see README "Why format_response
+  # isn't an LLM call"): turns a tool's structured JSON result into a short
+  # natural-language reply via a template per result shape.
+  - name: format_response
+    type: transform
+    inputs:
+      result: "$.output"
+
 edges:
-  - from: fetch_calendar_events
+  - from: router
+    to: fetch_calendar_events
+    when: "$.tool == fetch_calendar_events"
+  - from: router
     to: conflict_check
-  - from: conflict_check
+    when: "$.tool == conflict_check"
+  - from: router
     to: schedule_meeting
-    when: "$.status == clear"
-    # No edge for the conflict case — the run halts at conflict_check and
-    # surfaces suggested_alternatives as its final output (ADDING_AGENTS.md
-    # §3: a node with no matching outgoing edge ends the run there).
+    when: "$.tool == schedule_meeting"
+  - from: fetch_calendar_events
+    to: format_response
+  - from: conflict_check
+    to: format_response
+  - from: schedule_meeting
+    to: format_response

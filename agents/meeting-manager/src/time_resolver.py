@@ -75,9 +75,21 @@ def resolve_timerange(
         start, _ = _day_bounds(now, tz)
         end = start + timedelta(days=int(m.group(1)) + 1)
     else:
+        # dateparser's "next/this/last <weekday>" phrasing returns None in
+        # this version even though bare weekday names ("Friday") parse fine
+        # — strip the modifier and drive direction via PREFER_DATES_FROM
+        # instead of relying on dateparser to parse the phrase as a whole.
+        text_for_parser = text
+        prefer = "future"
+        weekday_modifier = re.match(r"(next|this|last)\s+(\w+)$", text)
+        if weekday_modifier:
+            modifier, day_name = weekday_modifier.groups()
+            text_for_parser = day_name
+            prefer = "past" if modifier == "last" else "future"
+
         parsed = dateparser.parse(
-            natural_language_input,
-            settings={"PREFER_DATES_FROM": "future", "RELATIVE_BASE": now.replace(tzinfo=None)},
+            text_for_parser,
+            settings={"PREFER_DATES_FROM": prefer, "RELATIVE_BASE": now.replace(tzinfo=None)},
         )
         if parsed is None:
             raise ValueError(f"Could not understand the time range: {natural_language_input!r}")
