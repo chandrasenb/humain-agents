@@ -31,6 +31,14 @@ deployment:
   # connected Google account.
   connectors:
     - provider: google
+  # 032-shared-agent-memory: opts this agent into the platform proxy's
+  # memory hooks (backend/routes/h2oo_proxy.py) — manifest-only change, no
+  # source code in this repo is touched. The proxy retrieves matching
+  # memories before forwarding an invocation (injected as `memory_context`)
+  # and extracts+stores new ones after the response completes.
+  memory:
+    enabled: true
+    retrieval_query: "user travel plans and preferences"
 
 # H2O-O v0.2 graph (docs/ADDING_AGENTS.md §3). NOTE: as of this writing the
 # HUMAIN marketplace backend does not auto-wire a manifest's nodes/edges to
