@@ -1,5 +1,5 @@
 name: meeting-manager
-version: "0.2.0"
+version: "0.2.2"
 description: >
   Reads and schedules Google Calendar events on the user's behalf, with
   conflict detection and alternative-slot suggestions. Requires the user to
@@ -12,6 +12,8 @@ description: >
 # the manifest schema only accepts python | node:20 | java:21.
 deployment:
   runtime: python
+  source_commit: "abc49735a5b9051637565f15644e0e13c876479f"
+  source_repo: "https://github.com/chandrasenb/humain-agents"
   resources:
     cpu: 1
     memory: 1Gi
@@ -26,6 +28,7 @@ deployment:
   secrets:
     - openai-api-key
     - openai-base-url
+    - openai-model-id
   # HUMAIN-2060 (FR-008/FR-009): the provision gate refuses to launch this
   # agent with `connector_required` unless the launching user has a
   # connected Google account.

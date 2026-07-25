@@ -27,6 +27,12 @@ from time_resolver import resolve_timerange
 
 app = FastAPI(title="meeting-manager")
 
+
+@app.get("/health")
+def health() -> dict[str, str]:
+    return {"status": "ok"}
+
+
 SEARCH_WINDOW_HOURS = 6
 SLOT_STEP_MINUTES = 30
 MAX_ALTERNATIVES = 3
