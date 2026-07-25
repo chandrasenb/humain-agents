@@ -1,5 +1,5 @@
 name: meeting-manager
-version: "0.2.2"
+version: "0.2.3"
 description: >
   Reads and schedules Google Calendar events on the user's behalf, with
   conflict detection and alternative-slot suggestions. Requires the user to
@@ -12,7 +12,7 @@ description: >
 # the manifest schema only accepts python | node:20 | java:21.
 deployment:
   runtime: python
-  source_commit: "abc49735a5b9051637565f15644e0e13c876479f"
+  source_commit: "8609a655f3e7dacc33e02b940d311dd867457084"
   source_repo: "https://github.com/chandrasenb/humain-agents"
   resources:
     cpu: 1

@@ -264,12 +264,12 @@ def schedule_meeting(req: ScheduleMeetingRequest) -> ScheduleMeetingResponse:
 # ── /chat (natural-language entry point — ../agent.yaml's `router` node) ─────
 
 # NVIDIA NIM's OpenAI-compatible API (same model agent.yaml's `router` node
-# declares). Matches agentic-invoice-processing's own pattern: that agent's
-# deploy manifests also set OPENAI_BASE_URL, and its code never reads it
-# explicitly either — the openai SDK picks up OPENAI_API_KEY/OPENAI_BASE_URL
-# on its own. We check both explicitly anyway, so a missing one fails with a
-# clear message instead of silently hitting the wrong (real OpenAI) endpoint.
-_MODEL = os.environ.get("OPENAI_MODEL_ID", "nvidia/nemotron-3-ultra-550b-a55b")
+# declares). The platform's shared pool-secret env vars use hyphens, not
+# underscores (confirmed via kubectl against the running pod's envFrom
+# secret) — OPENAI-API-KEY / OPENAI-BASE-URL / OPENAI-MODEL-ID, not the
+# OPENAI_* names the openai SDK would pick up on its own, hence the explicit
+# reads below instead of relying on the SDK's implicit env lookup.
+_MODEL = os.environ.get("OPENAI-MODEL-ID", "nvidia/nemotron-3-ultra-550b-a55b")
 
 ROUTER_SYSTEM_PROMPT = (
     "You are the Meeting Manager assistant. You help the user view their Google "
@@ -357,11 +357,11 @@ ROUTER_TOOLS = [
 
 
 def _llm_client() -> OpenAI:
-    api_key = os.environ.get("OPENAI_API_KEY")
-    base_url = os.environ.get("OPENAI_BASE_URL")
+    api_key = os.environ.get("OPENAI-API-KEY")
+    base_url = os.environ.get("OPENAI-BASE-URL")
     if not api_key or not base_url:
         raise RuntimeError(
-            "OPENAI_API_KEY and OPENAI_BASE_URL must both be set — /chat calls "
+            "OPENAI-API-KEY and OPENAI-BASE-URL must both be set — /chat calls "
             "NVIDIA NIM's OpenAI-compatible API through them."
         )
     return OpenAI(api_key=api_key, base_url=base_url)
