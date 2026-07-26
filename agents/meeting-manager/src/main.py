@@ -16,9 +16,11 @@ from __future__ import annotations
 import json
 import os
 from datetime import datetime, timedelta
+from pathlib import Path
 
 import dateparser
 from fastapi import FastAPI, HTTPException
+from fastapi.staticfiles import StaticFiles
 from openai import OpenAI
 from pydantic import BaseModel, Field
 
@@ -408,6 +410,12 @@ class ChatRequest(BaseModel):
 class ChatResponse(BaseModel):
     reply: str
     state: ConversationState
+    # Populated only for fetch_calendar_events (the events found) and a
+    # successful schedule_meeting (the one event just created) — the
+    # frontend renders these as a card carousel below the reply text.
+    # None (not an empty list) when there's nothing to show, so the
+    # frontend's "any cards at all?" check is a single falsy check.
+    events: list[EventSummary] | None = None
 
 
 @app.post("/chat", response_model=ChatResponse)
@@ -456,7 +464,22 @@ def chat(req: ChatRequest) -> ChatResponse:
     except ValueError as exc:  # e.g. missing/malformed required argument from the LLM
         raise HTTPException(status_code=422, detail=f"Could not act on that request: {exc}") from exc
 
+    events: list[EventSummary] | None = None
+    if tool_name == "fetch_calendar_events":
+        events = result.events or None
+    elif tool_name == "schedule_meeting" and result.status == "scheduled" and result.event:
+        events = [_to_event_summary(result.event)]
+
     reply = _format_reply(tool_name, result)
     state = _with_turn(req.state, req.message, role="user")
     state = _with_turn(state, reply)
-    return ChatResponse(reply=reply, state=state)
+    return ChatResponse(reply=reply, state=state, events=events)
+
+
+# ── Static frontend (Dockerfile stage 2 copies frontend/dist here) ──────────
+# Mounted last so it never shadows the API routes above — Starlette matches
+# routes in registration order. Guarded by existence so `uvicorn src.main:app`
+# still works for backend-only local dev/tests without a frontend build.
+_STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
+if _STATIC_DIR.is_dir():
+    app.mount("/", StaticFiles(directory=str(_STATIC_DIR), html=True), name="static")
