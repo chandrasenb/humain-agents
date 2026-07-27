@@ -1,5 +1,5 @@
 name: meeting-manager
-version: "2.6.16"
+version: "2.6.17"
 description: >
   Reads and schedules Google Calendar events on the user's behalf, with
   conflict detection and alternative-slot suggestions. Requires the user to

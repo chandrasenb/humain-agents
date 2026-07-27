@@ -8,7 +8,8 @@ have connected a Google account via the Connectors hub (HUMAIN-2060).
 
 | Method | Path | Purpose |
 |---|---|---|
-| `POST` | `/chat` | Natural-language entry point — see below. |
+| `POST` | `/chat` | Natural-language entry point — blocking JSON response. |
+| `POST` | `/chat/stream` | Same pipeline as `/chat`, but Server-Sent Events (SSE) — streams the reply word-by-word, then a final `done` event with `state` + `events`. |
 | `POST` | `/fetch_calendar_events` | Structured: `{query}` → list of events for a time range. |
 | `POST` | `/conflict_check` | Structured: `{when, duration_minutes}` → is that slot free? |
 | `POST` | `/schedule_meeting` | Structured: `{title, when, duration_minutes, attendees, description}` → books it, or returns conflicts + alternatives. |
@@ -54,6 +55,38 @@ at the top of `agent.yaml`):
 4. The user's message and the reply are appended to `state.messages` and
    returned, so the next `/chat` call has full history.
 
+## `/chat/stream` — SSE streaming
+
+Same request body as `/chat`. Response is `text/event-stream`:
+
+```
+data: {"type":"status","phase":"routing"}
+
+data: {"type":"status","phase":"tool","tool":"fetch_calendar_events"}
+
+data: {"type":"status","phase":"reply"}
+
+data: {"type":"token","content":"Here's "}
+
+data: {"type":"token","content":"what "}
+
+…
+
+data: {"type":"done","reply":"…","state":{…},"events":[…]}
+
+data: [DONE]
+```
+
+Streaming approach: the router LLM call uses OpenAI-compatible
+`stream=True` and accumulates tool-call deltas (name + partial JSON
+arguments) until the stream ends — with `tool_choice="required"` there are
+no content tokens to forward during this phase. After the tool executes,
+`_format_reply()` builds the full templated string (still not an LLM call),
+then the endpoint yields it word-by-word as `token` events. `state` and
+`events` (calendar cards) arrive only in the final `done` event — they
+aren't meaningful to stream incrementally. The web UI consumes this via
+`fetch` + `ReadableStream` (not `EventSource`, which can't POST a body).
+
 ### Why `format_response` isn't an LLM call
 
 `agent.yaml` declares `format_response` as `type: transform` (deterministic),
@@ -72,14 +105,18 @@ is served by this same FastAPI app as static assets — no separate frontend
 deployment, no separate origin, no CORS config needed.
 
 - **What it is**: a message input + send button, chat history (your
-  messages right-aligned, the agent's replies left-aligned), and — when a
-  `/chat` reply carries `events` — a horizontal scroll-snap card carousel
-  under that reply showing each event's title, time range, attendees, and
-  a "Join meeting" link when a `hangoutLink` is present. Plain CSS
-  `scroll-snap-type`/`scroll-snap-align`, no carousel library.
-- **How it talks to the backend**: `fetch('/chat', {method: 'POST', body:
-  {message, state}})` — a same-origin relative call, since the built UI is
-  served from the same app it's calling.
+  messages right-aligned, the agent's replies left-aligned with progressive
+  streaming text), and — when the stream's final `done` event carries
+  `events` — a horizontal scroll-snap card carousel under that reply
+  showing each event's title, time range, attendees, and a styled
+  "Join meeting" button when a `meeting_link`/`hangoutLink` is present.
+  Plain CSS `scroll-snap-type`/`scroll-snap-align`, overflow fade shadows,
+  and scroll-position dots — no carousel library. While waiting for the
+  first token, a three-dot bounce indicator sits in an agent bubble.
+- **How it talks to the backend**: `fetch('/chat/stream', {method: 'POST',
+  body: {message, state}})` + `ReadableStream` SSE parsing — a same-origin
+  relative call, since the built UI is served from the same app it's
+  calling. Partial text is kept if the stream errors mid-reply.
 - **Build**: `frontend/` is compiled at Docker build time, not committed as
   built output. The `Dockerfile` is a two-stage build:
   1. `node:20-slim` stage: `npm install` + `npm run build` inside

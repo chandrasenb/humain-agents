@@ -15,11 +15,15 @@ from __future__ import annotations
 
 import json
 import os
+import time
+from collections.abc import Iterator
 from datetime import datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 import dateparser
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from openai import OpenAI
 from pydantic import BaseModel, Field
@@ -418,20 +422,17 @@ class ChatResponse(BaseModel):
     events: list[EventSummary] | None = None
 
 
-@app.post("/chat", response_model=ChatResponse)
-def chat(req: ChatRequest) -> ChatResponse:
-    try:
-        client = _llm_client()
-    except RuntimeError as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
-
+def _router_messages(req: ChatRequest) -> list[dict[str, Any]]:
     history = [{"role": m.role, "content": m.content} for m in (req.state.messages if req.state else [])]
-    messages = [
+    return [
         {"role": "system", "content": ROUTER_SYSTEM_PROMPT},
         *history,
         {"role": "user", "content": req.message},
     ]
 
+
+def _select_tool_blocking(client: OpenAI, messages: list[dict[str, Any]]) -> tuple[str, dict[str, Any]]:
+    """Non-streaming router call — used by /chat."""
     try:
         completion = client.chat.completions.create(
             model=_MODEL,
@@ -446,34 +447,225 @@ def chat(req: ChatRequest) -> ChatResponse:
     if not tool_calls:
         raise HTTPException(status_code=502, detail="Router did not select a tool")
     tool_call = tool_calls[0]
-    tool_name = tool_call.function.name
     try:
         args = json.loads(tool_call.function.arguments)
     except json.JSONDecodeError as exc:
         raise HTTPException(status_code=502, detail=f"Router returned malformed arguments: {exc}") from exc
+    return tool_call.function.name, args
 
+
+def _select_tool_streaming(client: OpenAI, messages: list[dict[str, Any]]) -> tuple[str, dict[str, Any]]:
+    """Stream the router's tool-call decision, accumulating deltas until complete.
+
+    With tool_choice="required" the model emits no content tokens — only
+    tool_call deltas (name + partial JSON arguments). We assemble those
+    fragments, then return the finished (name, args) once the stream ends.
+    """
+    try:
+        stream = client.chat.completions.create(
+            model=_MODEL,
+            messages=messages,
+            tools=ROUTER_TOOLS,
+            tool_choice="required",
+            stream=True,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"LLM call failed: {exc}") from exc
+
+    # index → {id, name, arguments} — OpenAI may interleave multiple tool
+    # calls by index; we only ever expect one with tool_choice="required".
+    accumulated: dict[int, dict[str, str]] = {}
+    try:
+        for chunk in stream:
+            if not chunk.choices:
+                continue
+            delta = chunk.choices[0].delta
+            if not delta or not delta.tool_calls:
+                continue
+            for tc_delta in delta.tool_calls:
+                idx = tc_delta.index if tc_delta.index is not None else 0
+                slot = accumulated.setdefault(idx, {"id": "", "name": "", "arguments": ""})
+                if tc_delta.id:
+                    slot["id"] += tc_delta.id
+                if tc_delta.function:
+                    if tc_delta.function.name:
+                        slot["name"] += tc_delta.function.name
+                    if tc_delta.function.arguments:
+                        slot["arguments"] += tc_delta.function.arguments
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"LLM stream failed: {exc}") from exc
+
+    if not accumulated:
+        raise HTTPException(status_code=502, detail="Router did not select a tool")
+
+    tool = accumulated[min(accumulated)]
+    tool_name = tool["name"]
+    if not tool_name:
+        raise HTTPException(status_code=502, detail="Router did not select a tool")
+    try:
+        args = json.loads(tool["arguments"] or "{}")
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=502, detail=f"Router returned malformed arguments: {exc}") from exc
+    return tool_name, args
+
+
+def _dispatch_tool(tool_name: str, args: dict[str, Any]) -> BaseModel:
     try:
         if tool_name == "fetch_calendar_events":
-            result = fetch_calendar_events(FetchEventsRequest(**args))
-        elif tool_name == "conflict_check":
-            result = conflict_check(ConflictCheckRequest(**args))
-        elif tool_name == "schedule_meeting":
-            result = schedule_meeting(ScheduleMeetingRequest(**args))
-        else:
-            raise HTTPException(status_code=502, detail=f"Router selected an unknown tool: {tool_name!r}")
+            return fetch_calendar_events(FetchEventsRequest(**args))
+        if tool_name == "conflict_check":
+            return conflict_check(ConflictCheckRequest(**args))
+        if tool_name == "schedule_meeting":
+            return schedule_meeting(ScheduleMeetingRequest(**args))
+        raise HTTPException(status_code=502, detail=f"Router selected an unknown tool: {tool_name!r}")
     except ValueError as exc:  # e.g. missing/malformed required argument from the LLM
         raise HTTPException(status_code=422, detail=f"Could not act on that request: {exc}") from exc
 
-    events: list[EventSummary] | None = None
-    if tool_name == "fetch_calendar_events":
-        events = result.events or None
-    elif tool_name == "schedule_meeting" and result.status == "scheduled" and result.event:
-        events = [_to_event_summary(result.event)]
 
+def _events_for_reply(tool_name: str, result: BaseModel) -> list[EventSummary] | None:
+    if tool_name == "fetch_calendar_events":
+        return result.events or None
+    if tool_name == "schedule_meeting" and result.status == "scheduled" and result.event:
+        return [_to_event_summary(result.event)]
+    return None
+
+
+def _run_chat_turn(
+    req: ChatRequest,
+    *,
+    stream_tool_call: bool = False,
+) -> tuple[str, ConversationState, list[EventSummary] | None]:
+    """Shared /chat + /chat/stream pipeline: route → tool → format reply."""
+    try:
+        client = _llm_client()
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    messages = _router_messages(req)
+    if stream_tool_call:
+        tool_name, args = _select_tool_streaming(client, messages)
+    else:
+        tool_name, args = _select_tool_blocking(client, messages)
+
+    result = _dispatch_tool(tool_name, args)
+    events = _events_for_reply(tool_name, result)
     reply = _format_reply(tool_name, result)
     state = _with_turn(req.state, req.message, role="user")
     state = _with_turn(state, reply)
+    return reply, state, events
+
+
+def _chunk_reply_words(reply: str) -> Iterator[str]:
+    """Yield reply text word-by-word for SSE streaming.
+
+    `_format_reply` is a deterministic template (not an LLM call — see README),
+    so the full string already exists; we chunk it artificially so the UI can
+    render progressive text instead of dumping the whole reply at once.
+    """
+    if not reply:
+        return
+    # Split on whitespace but keep the separators so spacing is preserved.
+    parts = reply.split(" ")
+    for i, part in enumerate(parts):
+        chunk = part if i == len(parts) - 1 else part + " "
+        if chunk:
+            yield chunk
+
+
+def _sse_data(payload: Any) -> str:
+    if isinstance(payload, str):
+        return f"data: {payload}\n\n"
+    return f"data: {json.dumps(payload, default=str)}\n\n"
+
+
+@app.post("/chat", response_model=ChatResponse)
+def chat(req: ChatRequest) -> ChatResponse:
+    reply, state, events = _run_chat_turn(req, stream_tool_call=False)
     return ChatResponse(reply=reply, state=state, events=events)
+
+
+@app.post("/chat/stream")
+def chat_stream(req: ChatRequest) -> StreamingResponse:
+    """SSE streaming variant of /chat.
+
+    1. Stream-accumulate the LLM's tool-call decision (no content tokens —
+       tool_choice="required").
+    2. Execute the chosen tool (blocking calendar call).
+    3. Stream the templated reply word-by-word as `{"type":"token","content":…}`
+       events, then a final `{"type":"done","state":…,"events":…}` followed by
+       the literal `[DONE]` sentinel.
+    """
+
+    def generate() -> Iterator[str]:
+        try:
+            # Establish the SSE stream immediately so the client can show a
+            # typing indicator while the router LLM call is in flight.
+            yield _sse_data({"type": "status", "phase": "routing"})
+
+            try:
+                client = _llm_client()
+            except RuntimeError as exc:
+                yield _sse_data({"type": "error", "detail": str(exc)})
+                yield _sse_data("[DONE]")
+                return
+
+            messages = _router_messages(req)
+            try:
+                tool_name, args = _select_tool_streaming(client, messages)
+            except HTTPException as exc:
+                yield _sse_data({"type": "error", "detail": exc.detail})
+                yield _sse_data("[DONE]")
+                return
+            except Exception as exc:
+                yield _sse_data({"type": "error", "detail": f"LLM call failed: {exc}"})
+                yield _sse_data("[DONE]")
+                return
+
+            yield _sse_data({"type": "status", "phase": "tool", "tool": tool_name})
+
+            try:
+                result = _dispatch_tool(tool_name, args)
+            except HTTPException as exc:
+                yield _sse_data({"type": "error", "detail": exc.detail})
+                yield _sse_data("[DONE]")
+                return
+
+            events = _events_for_reply(tool_name, result)
+            reply = _format_reply(tool_name, result)
+            state = _with_turn(req.state, req.message, role="user")
+            state = _with_turn(state, reply)
+
+            yield _sse_data({"type": "status", "phase": "reply"})
+
+            for word in _chunk_reply_words(reply):
+                yield _sse_data({"type": "token", "content": word})
+                # Tiny pause so curl -N / browsers actually observe incremental
+                # chunks rather than one buffered flush at the end.
+                time.sleep(0.025)
+
+            events_payload = [e.model_dump() for e in events] if events else None
+            yield _sse_data(
+                {
+                    "type": "done",
+                    "reply": reply,
+                    "state": state.model_dump(),
+                    "events": events_payload,
+                }
+            )
+            yield _sse_data("[DONE]")
+        except Exception as exc:  # last-resort — never leave the client hanging
+            yield _sse_data({"type": "error", "detail": str(exc)})
+            yield _sse_data("[DONE]")
+
+    return StreamingResponse(
+        generate(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 # ── Static frontend (Dockerfile stage 2 copies frontend/dist here) ──────────
