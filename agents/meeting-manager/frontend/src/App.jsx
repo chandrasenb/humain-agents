@@ -156,8 +156,6 @@ export default function App() {
   const [error, setError] = useState(null)
   const conversationState = useRef(null)
   const historyRef = useRef(null)
-  // Index of the in-flight assistant bubble (so token appends don't race).
-  const streamingIndex = useRef(-1)
 
   useEffect(() => {
     const el = historyRef.current
@@ -173,11 +171,18 @@ export default function App() {
     setSending(true)
     setAwaitingFirstToken(true)
 
-    setMessages((prev) => {
-      const next = [...prev, { role: 'user', text }, { role: 'agent', text: '', events: null }]
-      streamingIndex.current = next.length - 1
-      return next
-    })
+    // Capture this turn's assistant-bubble index in a local const — NOT a ref
+    // cleared in `finally`. React 18 batches the SSE `done` setMessages with
+    // the finally-block setStates; if the updater re-reads a ref that finally
+    // already set to -1, it no-ops and `events` never attach (reply text still
+    // shows because token updates flushed earlier during the stream loop).
+    const assistantIdx = messages.length + 1
+
+    setMessages((prev) => [
+      ...prev,
+      { role: 'user', text },
+      { role: 'agent', text: '', events: null },
+    ])
 
     try {
       const res = await fetch('/chat/stream', {
@@ -198,9 +203,11 @@ export default function App() {
           setAwaitingFirstToken(false)
           setMessages((prev) => {
             const next = [...prev]
-            const idx = streamingIndex.current
-            if (idx < 0 || !next[idx]) return prev
-            next[idx] = { ...next[idx], text: (next[idx].text || '') + event.content }
+            if (!next[assistantIdx]) return prev
+            next[assistantIdx] = {
+              ...next[assistantIdx],
+              text: (next[assistantIdx].text || '') + event.content,
+            }
             return next
           })
         } else if (event.type === 'done') {
@@ -209,11 +216,10 @@ export default function App() {
           if (event.state) conversationState.current = event.state
           setMessages((prev) => {
             const next = [...prev]
-            const idx = streamingIndex.current
-            if (idx < 0 || !next[idx]) return prev
-            next[idx] = {
-              ...next[idx],
-              text: event.reply ?? next[idx].text,
+            if (!next[assistantIdx]) return prev
+            next[assistantIdx] = {
+              ...next[assistantIdx],
+              text: event.reply ?? next[assistantIdx].text,
               events: event.events ?? null,
             }
             return next
@@ -223,11 +229,10 @@ export default function App() {
           const detail = event.detail || 'Stream error'
           setMessages((prev) => {
             const next = [...prev]
-            const idx = streamingIndex.current
-            if (idx < 0 || !next[idx]) return prev
+            if (!next[assistantIdx]) return prev
             // Keep any partial text that already arrived.
-            next[idx] = {
-              ...next[idx],
+            next[assistantIdx] = {
+              ...next[assistantIdx],
               error: detail,
             }
             return next
@@ -243,12 +248,11 @@ export default function App() {
         setAwaitingFirstToken(false)
         setMessages((prev) => {
           const next = [...prev]
-          const idx = streamingIndex.current
-          if (idx < 0 || !next[idx]) return prev
-          if (!next[idx].text && !next[idx].error) {
-            next[idx] = { ...next[idx], error: 'Connection interrupted' }
-          } else if (next[idx].text && !next[idx].error) {
-            next[idx] = { ...next[idx], error: 'Connection interrupted' }
+          if (!next[assistantIdx]) return prev
+          if (!next[assistantIdx].text && !next[assistantIdx].error) {
+            next[assistantIdx] = { ...next[assistantIdx], error: 'Connection interrupted' }
+          } else if (next[assistantIdx].text && !next[assistantIdx].error) {
+            next[assistantIdx] = { ...next[assistantIdx], error: 'Connection interrupted' }
           }
           return next
         })
@@ -259,15 +263,14 @@ export default function App() {
       const detail = err.message || 'Something went wrong'
       setMessages((prev) => {
         const next = [...prev]
-        const idx = streamingIndex.current
-        if (idx >= 0 && next[idx]) {
+        if (next[assistantIdx]) {
           // Preserve partial streamed text if any arrived before the failure.
-          if (next[idx].text) {
-            next[idx] = { ...next[idx], error: detail }
+          if (next[assistantIdx].text) {
+            next[assistantIdx] = { ...next[assistantIdx], error: detail }
             return next
           }
           // Empty assistant bubble with no text — drop it and surface banner error.
-          return next.slice(0, idx)
+          return next.slice(0, assistantIdx)
         }
         return prev
       })
@@ -275,7 +278,6 @@ export default function App() {
     } finally {
       setSending(false)
       setAwaitingFirstToken(false)
-      streamingIndex.current = -1
     }
   }
 
