@@ -295,16 +295,29 @@ _MODEL = os.environ.get("OPENAI-MODEL-ID", "nvidia/nemotron-3-ultra-550b-a55b")
 
 ROUTER_SYSTEM_PROMPT = (
     "You are the Meeting Manager assistant. You help the user view their Google "
-    "Calendar and schedule meetings, with conflict detection. Always respond by "
-    "calling exactly one tool: fetch_calendar_events to look up events for a "
-    "described time range (e.g. \"today\", \"this week\", \"next Friday\"); "
-    "conflict_check to test whether a specific proposed time is free without "
-    "scheduling anything; or schedule_meeting to book a new meeting once the "
-    "user has given a title and a time. Pass the user's time phrase straight "
-    "through as the query/when argument — do not convert it to a date "
-    "yourself, the tool does that. Default duration_minutes to 30 if "
-    "unspecified. Only include attendees the user explicitly named as email "
-    "addresses."
+    "Calendar and schedule meetings, with conflict detection.\n\n"
+    "When to call a tool:\n"
+    "- fetch_calendar_events — look up events for a described time range "
+    "(e.g. \"today\", \"this week\", \"next Friday\", \"what's on my calendar\").\n"
+    "- conflict_check — test whether a specific proposed time is free without "
+    "scheduling anything (e.g. \"is tomorrow at 2pm free?\").\n"
+    "- schedule_meeting — book a new meeting when the user wants to schedule "
+    "something and has given at least a time. If they omit a title "
+    "(e.g. \"schedule something at 3pm today\"), still call schedule_meeting "
+    "with a sensible default title such as \"Meeting\".\n\n"
+    "When NOT to call a tool — reply with a short plain-text message instead:\n"
+    "- Greetings and small talk (e.g. \"hi\", \"hello\", \"thanks\") — greet "
+    "them back and briefly offer to help with calendar or scheduling. Do not "
+    "fetch their calendar.\n"
+    "- Cancel, delete, reschedule, or modify an existing event "
+    "(e.g. \"cancel my 2pm\", \"delete tomorrow's standup\") — you have no "
+    "tool for this. Politely explain that you can only view the calendar and "
+    "schedule new meetings, not cancel or change existing ones. Do not fetch "
+    "their calendar as a substitute.\n\n"
+    "Pass the user's time phrase straight through as the query/when argument — "
+    "do not convert it to a date yourself, the tool does that. Default "
+    "duration_minutes to 30 if unspecified. Only include attendees the user "
+    "explicitly named as email addresses."
 )
 
 ROUTER_TOOLS = [
@@ -354,11 +367,21 @@ ROUTER_TOOLS = [
         "type": "function",
         "function": {
             "name": "schedule_meeting",
-            "description": "Schedule a new meeting on the calendar after checking for conflicts.",
+            "description": (
+                "Schedule a new meeting on the calendar after checking for conflicts. "
+                "Use even when the user gives only a time and no title "
+                "(supply a default title such as 'Meeting')."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "title": {"type": "string"},
+                    "title": {
+                        "type": "string",
+                        "description": (
+                            "Meeting title. If the user did not specify one, use a "
+                            "sensible default such as 'Meeting'."
+                        ),
+                    },
                     "when": {
                         "type": "string",
                         "description": "Natural language start time, e.g. 'tomorrow 2pm'.",
@@ -447,56 +470,75 @@ def _router_messages(req: ChatRequest) -> list[dict[str, Any]]:
     ]
 
 
-def _select_tool_blocking(client: OpenAI, messages: list[dict[str, Any]]) -> tuple[str, dict[str, Any]]:
-    """Non-streaming router call — used by /chat."""
+def _select_tool_blocking(
+    client: OpenAI, messages: list[dict[str, Any]]
+) -> tuple[str | None, dict[str, Any] | None, str | None]:
+    """Non-streaming router call — used by /chat.
+
+    Returns (tool_name, args, None) when the model picks a tool, or
+    (None, None, content) when it replies conversationally with no tool call
+    (greetings, cancel/modify declines, etc.). tool_choice="auto" allows both.
+    """
     try:
         completion = client.chat.completions.create(
             model=_MODEL,
             messages=messages,
             tools=ROUTER_TOOLS,
-            tool_choice="required",
+            tool_choice="auto",
         )
     except Exception as exc:  # openai SDK's own exception hierarchy — network/auth/API errors
         raise HTTPException(status_code=502, detail=f"LLM call failed: {exc}") from exc
 
-    tool_calls = completion.choices[0].message.tool_calls
-    if not tool_calls:
-        raise HTTPException(status_code=502, detail="Router did not select a tool")
-    tool_call = tool_calls[0]
-    try:
-        args = json.loads(tool_call.function.arguments)
-    except json.JSONDecodeError as exc:
-        raise HTTPException(status_code=502, detail=f"Router returned malformed arguments: {exc}") from exc
-    return tool_call.function.name, args
+    message = completion.choices[0].message
+    tool_calls = message.tool_calls
+    if tool_calls:
+        tool_call = tool_calls[0]
+        try:
+            args = json.loads(tool_call.function.arguments)
+        except json.JSONDecodeError as exc:
+            raise HTTPException(status_code=502, detail=f"Router returned malformed arguments: {exc}") from exc
+        return tool_call.function.name, args, None
+
+    content = (message.content or "").strip()
+    if content:
+        return None, None, content
+    raise HTTPException(status_code=502, detail="Router returned neither a tool call nor a reply")
 
 
-def _select_tool_streaming(client: OpenAI, messages: list[dict[str, Any]]) -> tuple[str, dict[str, Any]]:
-    """Stream the router's tool-call decision, accumulating deltas until complete.
+def _select_tool_streaming(
+    client: OpenAI, messages: list[dict[str, Any]]
+) -> tuple[str | None, dict[str, Any] | None, str | None]:
+    """Stream the router's decision, accumulating deltas until complete.
 
-    With tool_choice="required" the model emits no content tokens — only
-    tool_call deltas (name + partial JSON arguments). We assemble those
-    fragments, then return the finished (name, args) once the stream ends.
+    With tool_choice="auto" the model may emit tool_call deltas OR content
+    tokens (plain conversational reply). We assemble whichever arrives and
+    return (tool_name, args, None) or (None, None, content).
     """
     try:
         stream = client.chat.completions.create(
             model=_MODEL,
             messages=messages,
             tools=ROUTER_TOOLS,
-            tool_choice="required",
+            tool_choice="auto",
             stream=True,
         )
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"LLM call failed: {exc}") from exc
 
     # index → {id, name, arguments} — OpenAI may interleave multiple tool
-    # calls by index; we only ever expect one with tool_choice="required".
+    # calls by index; we only ever expect at most one.
     accumulated: dict[int, dict[str, str]] = {}
+    content_parts: list[str] = []
     try:
         for chunk in stream:
             if not chunk.choices:
                 continue
             delta = chunk.choices[0].delta
-            if not delta or not delta.tool_calls:
+            if not delta:
+                continue
+            if delta.content:
+                content_parts.append(delta.content)
+            if not delta.tool_calls:
                 continue
             for tc_delta in delta.tool_calls:
                 idx = tc_delta.index if tc_delta.index is not None else 0
@@ -511,18 +553,21 @@ def _select_tool_streaming(client: OpenAI, messages: list[dict[str, Any]]) -> tu
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"LLM stream failed: {exc}") from exc
 
-    if not accumulated:
-        raise HTTPException(status_code=502, detail="Router did not select a tool")
+    if accumulated:
+        tool = accumulated[min(accumulated)]
+        tool_name = tool["name"]
+        if not tool_name:
+            raise HTTPException(status_code=502, detail="Router did not select a tool")
+        try:
+            args = json.loads(tool["arguments"] or "{}")
+        except json.JSONDecodeError as exc:
+            raise HTTPException(status_code=502, detail=f"Router returned malformed arguments: {exc}") from exc
+        return tool_name, args, None
 
-    tool = accumulated[min(accumulated)]
-    tool_name = tool["name"]
-    if not tool_name:
-        raise HTTPException(status_code=502, detail="Router did not select a tool")
-    try:
-        args = json.loads(tool["arguments"] or "{}")
-    except json.JSONDecodeError as exc:
-        raise HTTPException(status_code=502, detail=f"Router returned malformed arguments: {exc}") from exc
-    return tool_name, args
+    content = "".join(content_parts).strip()
+    if content:
+        return None, None, content
+    raise HTTPException(status_code=502, detail="Router returned neither a tool call nor a reply")
 
 
 def _dispatch_tool(tool_name: str, args: dict[str, Any]) -> BaseModel:
@@ -551,7 +596,7 @@ def _run_chat_turn(
     *,
     stream_tool_call: bool = False,
 ) -> tuple[str, ConversationState, list[EventSummary] | None]:
-    """Shared /chat + /chat/stream pipeline: route → tool → format reply."""
+    """Shared /chat + /chat/stream pipeline: route → (tool | plain reply) → format."""
     try:
         client = _llm_client()
     except RuntimeError as exc:
@@ -559,13 +604,18 @@ def _run_chat_turn(
 
     messages = _router_messages(req)
     if stream_tool_call:
-        tool_name, args = _select_tool_streaming(client, messages)
+        tool_name, args, plain_reply = _select_tool_streaming(client, messages)
     else:
-        tool_name, args = _select_tool_blocking(client, messages)
+        tool_name, args, plain_reply = _select_tool_blocking(client, messages)
 
-    result = _dispatch_tool(tool_name, args)
-    events = _events_for_reply(tool_name, result)
-    reply = _format_reply(tool_name, result)
+    if tool_name is None:
+        reply = plain_reply or ""
+        events = None
+    else:
+        result = _dispatch_tool(tool_name, args or {})
+        events = _events_for_reply(tool_name, result)
+        reply = _format_reply(tool_name, result)
+
     state = _with_turn(req.state, req.message, role="user")
     state = _with_turn(state, reply)
     return reply, state, events
@@ -604,10 +654,11 @@ def chat(req: ChatRequest) -> ChatResponse:
 def chat_stream(req: ChatRequest) -> StreamingResponse:
     """SSE streaming variant of /chat.
 
-    1. Stream-accumulate the LLM's tool-call decision (no content tokens —
-       tool_choice="required").
-    2. Execute the chosen tool (blocking calendar call).
-    3. Stream the templated reply word-by-word as `{"type":"token","content":…}`
+    1. Stream-accumulate the LLM's routing decision (tool call or plain reply —
+       tool_choice="auto").
+    2. If a tool was chosen, execute it (blocking calendar call); otherwise use
+       the model's conversational content as the reply.
+    3. Stream the reply word-by-word as `{"type":"token","content":…}`
        events, then a final `{"type":"done","state":…,"events":…}` followed by
        the literal `[DONE]` sentinel.
     """
@@ -627,7 +678,7 @@ def chat_stream(req: ChatRequest) -> StreamingResponse:
 
             messages = _router_messages(req)
             try:
-                tool_name, args = _select_tool_streaming(client, messages)
+                tool_name, args, plain_reply = _select_tool_streaming(client, messages)
             except HTTPException as exc:
                 yield _sse_data({"type": "error", "detail": exc.detail})
                 yield _sse_data("[DONE]")
@@ -637,17 +688,22 @@ def chat_stream(req: ChatRequest) -> StreamingResponse:
                 yield _sse_data("[DONE]")
                 return
 
-            yield _sse_data({"type": "status", "phase": "tool", "tool": tool_name})
+            if tool_name is None:
+                reply = plain_reply or ""
+                events = None
+            else:
+                yield _sse_data({"type": "status", "phase": "tool", "tool": tool_name})
 
-            try:
-                result = _dispatch_tool(tool_name, args)
-            except HTTPException as exc:
-                yield _sse_data({"type": "error", "detail": exc.detail})
-                yield _sse_data("[DONE]")
-                return
+                try:
+                    result = _dispatch_tool(tool_name, args or {})
+                except HTTPException as exc:
+                    yield _sse_data({"type": "error", "detail": exc.detail})
+                    yield _sse_data("[DONE]")
+                    return
 
-            events = _events_for_reply(tool_name, result)
-            reply = _format_reply(tool_name, result)
+                events = _events_for_reply(tool_name, result)
+                reply = _format_reply(tool_name, result)
+
             state = _with_turn(req.state, req.message, role="user")
             state = _with_turn(state, reply)
 

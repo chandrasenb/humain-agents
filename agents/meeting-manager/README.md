@@ -50,13 +50,14 @@ at the top of `agent.yaml`):
    message go to an LLM (NVIDIA NIM, `nvidia/nemotron-3-ultra-550b-a55b`,
    via the OpenAI-compatible API — `OPENAI_API_KEY` + `OPENAI_BASE_URL`)
    with three function definitions: `fetch_calendar_events`,
-   `conflict_check`, `schedule_meeting`. `tool_choice="required"` forces it
-   to pick exactly one.
+   `conflict_check`, `schedule_meeting`. `tool_choice="auto"` lets it pick
+   a tool or reply in plain text (greetings, cancel/modify declines).
 2. `src/main.py`'s `/chat` handler parses the returned tool name + JSON
    arguments and calls the matching Python function **directly** (e.g.
    `fetch_calendar_events(FetchEventsRequest(**args))`) — not an HTTP
    self-call, just a normal function call reusing the exact same code the
-   structured endpoints use.
+   structured endpoints use. If the model returned content with no tool
+   call, that content is used as the reply directly.
 3. The structured result goes through `_format_reply()`, a plain template
    per result shape, to produce the `reply` string.
 4. The user's message and the reply are appended to `state.messages` and
@@ -86,10 +87,11 @@ data: [DONE]
 
 Streaming approach: the router LLM call uses OpenAI-compatible
 `stream=True` and accumulates tool-call deltas (name + partial JSON
-arguments) until the stream ends — with `tool_choice="required"` there are
-no content tokens to forward during this phase. After the tool executes,
-`_format_reply()` builds the full templated string (still not an LLM call),
-then the endpoint yields it word-by-word as `token` events. `state` and
+arguments) or content tokens when `tool_choice="auto"` yields a plain
+reply. After a tool executes (or a conversational reply is chosen),
+`_format_reply()` builds the full templated string when a tool ran (still
+not an LLM call), then the endpoint yields it word-by-word as `token`
+events. `state` and
 `events` (calendar cards) arrive only in the final `done` event — they
 aren't meaningful to stream incrementally. The web UI consumes this via
 `fetch` + `ReadableStream` (not `EventSource`, which can't POST a body).
