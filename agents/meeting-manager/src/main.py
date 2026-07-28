@@ -27,9 +27,10 @@ from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from openai import OpenAI
 from pydantic import BaseModel, Field
+from googleapiclient.errors import HttpError
 
 import calendar_tools
-from time_resolver import resolve_timerange
+from time_resolver import resolve_instant, resolve_timerange
 
 app = FastAPI(title="meeting-manager")
 
@@ -221,10 +222,16 @@ def conflict_check(req: ConflictCheckRequest) -> ConflictCheckResponse:
 
 
 def _parse_time(text: str) -> datetime:
-    parsed = dateparser.parse(text, settings={"PREFER_DATES_FROM": "future"})
-    if parsed is None:
-        raise HTTPException(status_code=422, detail=f"Could not understand the time expression: {text!r}")
-    return parsed
+    """Point-in-time parse for conflict_check / schedule_meeting.
+
+    Delegates to ``resolve_instant`` so the result is always timezone-aware
+    UTC — matching ``resolve_timerange`` used by fetch_calendar_events.
+    Naive stamps make Google Calendar return HTTP 400 badRequest.
+    """
+    try:
+        return resolve_instant(text, account_email=_account_email())
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 # ── /schedule_meeting ─────────────────────────────────────────────────────────
@@ -581,6 +588,16 @@ def _dispatch_tool(tool_name: str, args: dict[str, Any]) -> BaseModel:
         raise HTTPException(status_code=502, detail=f"Router selected an unknown tool: {tool_name!r}")
     except ValueError as exc:  # e.g. missing/malformed required argument from the LLM
         raise HTTPException(status_code=422, detail=f"Could not act on that request: {exc}") from exc
+    except HttpError as exc:
+        # Calendar API 4xx/5xx used to bubble as an unhandled ASGI 500 with a
+        # full traceback (same class of gap as the RefreshError →
+        # AccessTokenCredentials fix). Surface a clean message instead.
+        status = getattr(getattr(exc, "resp", None), "status", "?")
+        reason = getattr(exc, "_get_reason", lambda: str(exc))()
+        raise HTTPException(
+            status_code=502,
+            detail=f"Google Calendar request failed ({status}): {reason}",
+        ) from exc
 
 
 def _events_for_reply(tool_name: str, result: BaseModel) -> list[EventSummary] | None:

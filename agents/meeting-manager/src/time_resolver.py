@@ -98,3 +98,29 @@ def resolve_timerange(
         start, end = _day_bounds(parsed, tz)
 
     return start.astimezone(timezone.utc), end.astimezone(timezone.utc)
+
+
+def resolve_instant(
+    natural_language_input: str,
+    account_email: str | None = None,
+) -> datetime:
+    """Resolve a point-in-time phrase (e.g. "tomorrow 2pm") to a UTC datetime.
+
+    Uses the same account-email → timezone heuristic as ``resolve_timerange``
+    so conflict_check / schedule_meeting send timezone-aware RFC3339 stamps
+    to Google Calendar (naive ``isoformat()`` values are rejected with 400).
+    """
+    tz = _resolve_timezone(account_email)
+    now = datetime.now(tz)
+    parsed = dateparser.parse(
+        natural_language_input.strip(),
+        settings={
+            "PREFER_DATES_FROM": "future",
+            "RELATIVE_BASE": now.replace(tzinfo=None),
+        },
+    )
+    if parsed is None:
+        raise ValueError(f"Could not understand the time expression: {natural_language_input!r}")
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=tz)
+    return parsed.astimezone(timezone.utc)

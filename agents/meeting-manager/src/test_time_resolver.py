@@ -1,8 +1,8 @@
-"""Self-check for resolve_timerange(). Run with: python test_time_resolver.py"""
+"""Self-check for resolve_timerange() / resolve_instant(). Run with: python test_time_resolver.py"""
 
-from datetime import timedelta
+from datetime import timedelta, timezone
 
-from time_resolver import resolve_timerange
+from time_resolver import resolve_instant, resolve_timerange
 
 
 def demo() -> None:
@@ -27,6 +27,12 @@ def demo() -> None:
     # Unknown domain defaults to UTC; a known one resolves to its zone.
     utc_start, _ = resolve_timerange("today", account_email="dev@example.com")
     assert utc_start.utcoffset() == timedelta(0)
+
+    # Point-in-time parse used by conflict_check / schedule_meeting — must be
+    # timezone-aware UTC (naive isoformat stamps get Google Calendar 400s).
+    instant = resolve_instant("tomorrow 2pm", account_email="dev@example.com")
+    assert instant.tzinfo is not None
+    assert instant.astimezone(timezone.utc).utcoffset() == timedelta(0)
 
     print("ok")
 
