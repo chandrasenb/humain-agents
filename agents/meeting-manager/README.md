@@ -18,6 +18,13 @@ The three structured endpoints all accept and return an optional
 `state: {messages: [{role, content}]}` — in-context conversation memory,
 threaded straight through (no Redis/pgvector yet — HUMAIN-1966/1967).
 
+`fetch_calendar_events`, `conflict_check`, and `schedule_meeting` are
+callable but excluded from the published OpenAPI schema
+(`include_in_schema=False`, EB-0040 in `humain-marketplace`): an
+OpenAPI-driven consumer (e.g. Prism's agent auto-discovery) that scans POST
+routes for a chat contract must land on `/chat`, not one of these internal
+tool endpoints.
+
 ## `/chat` — natural-language routing
 
 ```

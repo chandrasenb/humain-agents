@@ -103,7 +103,15 @@ def _to_event_summary(raw: dict) -> EventSummary:
     )
 
 
-@app.post("/fetch_calendar_events", response_model=FetchEventsResponse)
+# include_in_schema=False on this and the other internal tool endpoints below
+# (EB-0040): OpenAPI-driven consumers like Prism discover the chat contract by
+# scanning POST routes, and an internal tool endpoint sorting before /chat can
+# get wired up as the "chat" endpoint by mistake.
+@app.post(
+    "/fetch_calendar_events",
+    response_model=FetchEventsResponse,
+    include_in_schema=False,
+)
 def fetch_calendar_events(req: FetchEventsRequest) -> FetchEventsResponse:
     try:
         time_min, time_max = resolve_timerange(req.query, account_email=_account_email())
@@ -199,7 +207,11 @@ class ConflictCheckResponse(BaseModel):
     state: ConversationState
 
 
-@app.post("/conflict_check", response_model=ConflictCheckResponse)
+@app.post(
+    "/conflict_check",
+    response_model=ConflictCheckResponse,
+    include_in_schema=False,
+)
 def conflict_check(req: ConflictCheckRequest) -> ConflictCheckResponse:
     start = _parse_time(req.when)
     result = _check_conflicts(start, timedelta(minutes=req.duration_minutes))
@@ -235,7 +247,11 @@ class ScheduleMeetingResponse(BaseModel):
     state: ConversationState
 
 
-@app.post("/schedule_meeting", response_model=ScheduleMeetingResponse)
+@app.post(
+    "/schedule_meeting",
+    response_model=ScheduleMeetingResponse,
+    include_in_schema=False,
+)
 def schedule_meeting(req: ScheduleMeetingRequest) -> ScheduleMeetingResponse:
     start = _parse_time(req.when)
     duration = timedelta(minutes=req.duration_minutes)
