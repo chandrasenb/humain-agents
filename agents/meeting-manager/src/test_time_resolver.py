@@ -34,6 +34,48 @@ def demo() -> None:
     assert instant.tzinfo is not None
     assert instant.astimezone(timezone.utc).utcoffset() == timedelta(0)
 
+    # EB-0040 follow-up: day-part / weekend / month / word-number phrases
+    # that previously raised ValueError (Prism eval failures on "what's on
+    # my schedule this afternoon?", "anything on my calendar this
+    # weekend?", "show me this month's meetings", etc.)
+    afternoon_start, afternoon_end = resolve_timerange("this afternoon")
+    assert afternoon_end - afternoon_start == timedelta(hours=6)
+    assert afternoon_start.astimezone(timezone.utc).hour == 12
+
+    tonight_start, tonight_end = resolve_timerange("tonight")
+    assert tonight_end - tonight_start == timedelta(hours=6)
+    assert tonight_start.astimezone(timezone.utc).hour == 18
+
+    morning_start, morning_end = resolve_timerange("tomorrow morning")
+    assert morning_end - morning_start == timedelta(hours=6)
+    assert morning_start.astimezone(timezone.utc).hour == 6
+    assert (morning_start.date() - afternoon_start.date()).days == 1
+
+    weekend_start, weekend_end = resolve_timerange("this weekend")
+    assert weekend_end - weekend_start == timedelta(days=2)
+    assert weekend_start.weekday() == 5  # Saturday
+
+    month_start, month_end = resolve_timerange("this month")
+    assert month_start.day == 1
+    assert month_end.day == 1
+    assert month_start.month != month_end.month or month_start.year != month_end.year
+
+    next3_start, next3_end = resolve_timerange("next three days")
+    assert next3_end - next3_start == timedelta(days=4)  # today + 3 days out
+
+    # "next N days" still accepts digits alongside the new word-number form.
+    next3_digits_start, next3_digits_end = resolve_timerange("next 3 days")
+    assert (next3_digits_start, next3_digits_end) == (next3_start, next3_end)
+
+    # conflict_check's "when" sometimes receives a day-part phrase verbatim
+    # (e.g. "is my afternoon free tomorrow?" -> when="tomorrow afternoon")
+    # instead of a specific instant — resolves to the window's start rather
+    # than raising.
+    afternoon_instant = resolve_instant("tomorrow afternoon")
+    assert afternoon_instant.hour == 12
+    tonight_instant = resolve_instant("tonight")
+    assert tonight_instant.hour == 18
+
     print("ok")
 
 
