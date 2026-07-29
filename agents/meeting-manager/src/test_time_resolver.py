@@ -76,6 +76,19 @@ def demo() -> None:
     tonight_instant = resolve_instant("tonight")
     assert tonight_instant.hour == 18
 
+    # Weekday name + day-part (Prism eval-run 3418: "am I busy this Thursday
+    # morning?" -> conflict_check when="Thursday morning" raised ValueError).
+    thu_morning_start, thu_morning_end = resolve_timerange("Thursday morning")
+    assert thu_morning_end - thu_morning_start == timedelta(hours=6)
+    assert thu_morning_start.astimezone(timezone.utc).hour == 6
+
+    thu_morning_instant = resolve_instant("Thursday morning")
+    assert thu_morning_instant.hour == 6
+    assert thu_morning_instant.date() == thu_morning_start.astimezone(timezone.utc).date()
+
+    friday_evening_instant = resolve_instant("next Friday evening")
+    assert friday_evening_instant.hour == 18
+
     print("ok")
 
 

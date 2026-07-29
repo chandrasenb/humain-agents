@@ -93,18 +93,38 @@ def _month_bounds(day: datetime, tz: ZoneInfo) -> tuple[datetime, datetime]:
     return start, end
 
 
-def _match_daypart(text: str) -> tuple[int, str] | None:
-    """Returns (day_offset, part) for a day-part phrase ("this afternoon",
-    "tonight", "tomorrow morning"), else None. Shared by resolve_timerange
-    (a window) and resolve_instant (the window's start, e.g. for
-    conflict_check when the router passes through an ambiguous "is my
-    afternoon free tomorrow?"-style phrase instead of a specific time)."""
+_WEEKDAYS = {"monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"}
+
+
+def _match_daypart(text: str, now: datetime, tz: ZoneInfo) -> tuple[datetime, str] | None:
+    """Returns (day, part) for a day-part phrase — "this afternoon",
+    "tonight", "tomorrow morning", or a weekday + day-part like "Thursday
+    morning" / "next Friday evening" — else None. `day` is the resolved
+    calendar day (time-of-day component unused by callers). Shared by
+    resolve_timerange (a window) and resolve_instant (the window's start,
+    e.g. for conflict_check when the router passes through an ambiguous
+    "is my afternoon free tomorrow?"-style phrase instead of a specific
+    time)."""
     if text == "tonight":
-        return 0, "night"
+        return now, "night"
     if m := re.fullmatch(r"(?:this|today)\s+(morning|afternoon|evening|night)", text):
-        return 0, m.group(1)
+        return now, m.group(1)
     if m := re.fullmatch(r"tomorrow\s+(morning|afternoon|evening|night)", text):
-        return 1, m.group(1)
+        return now + timedelta(days=1), m.group(1)
+    if m := re.fullmatch(r"(?:(next|this|last)\s+)?(\w+)\s+(morning|afternoon|evening|night)", text):
+        modifier, day_name, part = m.groups()
+        if day_name not in _WEEKDAYS:
+            return None
+        parsed = dateparser.parse(
+            day_name,
+            settings={
+                "PREFER_DATES_FROM": "past" if modifier == "last" else "future",
+                "RELATIVE_BASE": now.replace(tzinfo=None),
+            },
+        )
+        if parsed is None:
+            return None
+        return (parsed if parsed.tzinfo else parsed.replace(tzinfo=tz)), part
     return None
 
 
@@ -138,9 +158,9 @@ def resolve_timerange(
         start, end = _weekend_bounds(now, tz)
     elif text == "this month":
         start, end = _month_bounds(now, tz)
-    elif (daypart := _match_daypart(text)) is not None:
-        offset, part = daypart
-        start, end = _daypart_bounds(now + timedelta(days=offset), tz, part)
+    elif (daypart := _match_daypart(text, now, tz)) is not None:
+        day, part = daypart
+        start, end = _daypart_bounds(day, tz, part)
     elif m := re.fullmatch(r"last (\d+) days?", text):
         today_start, _ = _day_bounds(now, tz)
         start = today_start - timedelta(days=int(m.group(1)))
@@ -197,10 +217,10 @@ def resolve_instant(
     # no notion of "afternoon"/"tonight" and raises on all of these; resolve
     # to the window's start as the representative instant instead of
     # rejecting a request that resolve_timerange would otherwise understand.
-    daypart = _match_daypart(text)
+    daypart = _match_daypart(text, now, tz)
     if daypart is not None:
-        offset, part = daypart
-        start, _ = _daypart_bounds(now + timedelta(days=offset), tz, part)
+        day, part = daypart
+        start, _ = _daypart_bounds(day, tz, part)
         return start.astimezone(timezone.utc)
 
     parsed = dateparser.parse(
