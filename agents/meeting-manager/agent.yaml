@@ -13,7 +13,7 @@ description: >
 # the manifest schema only accepts python | node:20 | java:21.
 deployment:
   runtime: python
-  source_commit: "494586d9dc0d7ab6af69208c5aa62fed28106a0d"
+  source_commit: "e6060775de95291cb0934cea77c7ce2ac6678037"
   source_repo: "https://github.com/chandrasenb/humain-agents"
   resources:
     cpu: 1
