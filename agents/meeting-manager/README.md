@@ -152,7 +152,7 @@ deployment, no separate origin, no CORS config needed.
 | Var | Source | Required for |
 |---|---|---|
 | `GOOGLE_ACCESS_TOKEN`, `GOOGLE_ACCOUNT_EMAIL` | Connectors hub OAuth (`agent.yaml`'s `deployment.connectors: [{provider: google}]`) | All Calendar API calls |
-| `OPENAI-API-KEY`, `OPENAI-BASE-URL` | Secret Manager (`agent.yaml`'s `deployment.secrets: [openai-api-key, openai-base-url]`), pointed at NVIDIA NIM (`https://integrate.api.nvidia.com/v1`). Hyphenated, not `OPENAI_API_KEY` — the platform's shared pool-secret env vars use hyphens, confirmed via `kubectl` against a running pod's `envFrom` secret; the openai SDK's own implicit env lookup (which expects underscores) is not relied on. | `/chat` only |
+| `OPENAI-API-KEY`, `OPENAI-BASE-URL` | Secret Manager (`agent.yaml`'s `deployment.secrets: [OPENAI-API-KEY, OPENAI-BASE-URL]`), pointed at NVIDIA NIM (`https://integrate.api.nvidia.com/v1`). Declared names are injected verbatim — uppercase-with-hyphens is the platform pool-secret convention (not `OPENAI_API_KEY`); the openai SDK's own implicit env lookup (underscores) is not relied on. | `/chat` only |
 | `OPENAI-MODEL-ID` | Optional override, same hyphenated-name reasoning as above | `/chat` only — defaults to `nvidia/nemotron-3-ultra-550b-a55b` |
 
 The three structured endpoints work with no LLM key at all — only `/chat`

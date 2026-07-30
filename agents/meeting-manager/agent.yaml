@@ -1,5 +1,5 @@
 name: meeting-manager
-version: "2.6.31"
+version: "2.6.32"
 # marketplace redeploy marker (unique source_commit)
 description: >
   Reads and schedules Google Calendar events on the user's behalf, with
@@ -13,23 +13,22 @@ description: >
 # the manifest schema only accepts python | node:20 | java:21.
 deployment:
   runtime: python
-  source_commit: "e6060775de95291cb0934cea77c7ce2ac6678037"
+  source_commit: "e46ab0e7701953a8e5697387169a2fb1143ea534"
   source_repo: "https://github.com/chandrasenb/humain-agents"
   resources:
     cpu: 1
     memory: 1Gi
-  # `openai-api-key` / `openai-base-url` are existing Secret Manager entry
-  # names (same names agentic-invoice-processing/agent.yaml declares) — the
-  # platform injects them as OPENAI_API_KEY / OPENAI_BASE_URL, which
-  # src/main.py's /chat endpoint reads to call NVIDIA NIM's OpenAI-
-  # compatible API for intent routing. No other secrets: the Google OAuth
-  # token is injected directly as GOOGLE_ACCESS_TOKEN / GOOGLE_ACCOUNT_EMAIL
-  # by the Connectors hub's provision gate (specs/028-user-integrations-
-  # connectors), not read from `secrets:`.
+  # Declared names are injected into the pod env verbatim (FE upsert + BE
+  # resolve_agent_secret_env_vars do not rename). Platform pool-secret
+  # convention is uppercase-with-hyphens — matching what src/main.py's
+  # /chat reads for NVIDIA NIM's OpenAI-compatible API. No other secrets:
+  # the Google OAuth token is injected directly as GOOGLE_ACCESS_TOKEN /
+  # GOOGLE_ACCOUNT_EMAIL by the Connectors hub's provision gate
+  # (specs/028-user-integrations-connectors), not read from `secrets:`.
   secrets:
-    - openai-api-key
-    - openai-base-url
-    - openai-model-id
+    - OPENAI-API-KEY
+    - OPENAI-BASE-URL
+    - OPENAI-MODEL-ID
   # HUMAIN-2060 (FR-008/FR-009): the provision gate refuses to launch this
   # agent with `connector_required` unless the launching user has a
   # connected Google account.
